@@ -45,6 +45,7 @@ import (
 	"errors"
 	"runtime"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -130,8 +131,9 @@ func (info DeviceInfo) Open() (*Device, error) {
 type Device struct {
 	DeviceInfo // Embed the infos for easier access
 
-	device *C.hid_device // Low level HID device to communicate through
-	lock   sync.Mutex
+	device   *C.hid_device // Low level HID device to communicate through
+	deadline time.Time
+	lock     sync.Mutex
 }
 
 // Close releases the HID USB device handle.
@@ -143,6 +145,14 @@ func (dev *Device) Close() error {
 		C.hid_close(dev.device)
 		dev.device = nil
 	}
+	return nil
+}
+
+// SetReadDeadline sets the deadline for the next read operation
+func (dev *Device) SetReadDeadline(deadline time.Time) error {
+	dev.lock.Lock()
+	defer dev.lock.Unlock()
+	dev.deadline = deadline
 	return nil
 }
 
@@ -171,7 +181,7 @@ func (dev *Device) Write(b []byte) (int, error) {
 		report = b
 	}
 	// Execute the write operation
-	written := int(C.hid_write(device, (*C.uchar)(&report[0]), C.size_t(len(report))))
+	written:= int(C.hid_write(device, (*C.uchar)(&report[0]), C.size_t(len(report))))
 	if written == -1 {
 		// If the write failed, verify if closed or other error
 		dev.lock.Lock()
@@ -206,8 +216,19 @@ func (dev *Device) Read(b []byte) (int, error) {
 	if device == nil {
 		return 0, ErrDeviceClosed
 	}
+	// Calculate timeout
+	timeout := C.int(0)
+	if !dev.deadline.IsZero() {
+		timeout = C.int(dev.deadline.Sub(time.Now())/time.Millisecond)
+		dev.deadline = time.Time{}
+	}
 	// Execute the read operation
-	read := int(C.hid_read(device, (*C.uchar)(&b[0]), C.size_t(len(b))))
+	var read int
+	if timeout > 0 {
+		read = int(C.hid_read_timeout(device, (*C.uchar)(&b[0]), C.size_t(len(b)), timeout))
+	} else {
+		read = int(C.hid_read(device, (*C.uchar)(&b[0]), C.size_t(len(b))))
+	}
 	if read == -1 {
 		// If the read failed, verify if closed or other error
 		dev.lock.Lock()
